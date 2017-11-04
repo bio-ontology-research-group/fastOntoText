@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <stdexcept>
 
+#define BUFFERSIZE 32768
+
 
 namespace fasttext {
 
@@ -342,11 +344,33 @@ void FastText::skipgram(Model& model, real lr,
                         const std::vector<int32_t>& line) {
   std::uniform_int_distribution<> uniform(1, args_->ws);
   for (int32_t w = 0; w < line.size(); w++) {
-    int32_t boundary = uniform(model.rng);
-    const std::vector<int32_t>& ngrams = dict_->getSubwords(line[w]);
-    for (int32_t c = -boundary; c <= boundary; c++) {
-      if (c != 0 && w + c >= 0 && w + c < line.size()) {
-        model.update(ngrams, line[w + c], lr);
+    if (!ontmap[dict_->getWord(w)].empty()) { // it's an ontology class...
+      // train for w
+      int32_t boundary = uniform(model.rng);
+      const std::vector<int32_t>& ngrams = dict_->getSubwords(line[w]);
+      for (int32_t c = -boundary; c <= boundary; c++) {
+	if (c != 0 && w + c >= 0 && w + c < line.size()) {
+	  model.update(ngrams, line[w + c], lr);
+	}
+      }
+      // train for all superclasses
+      for (int i = 0 ; i < ontmap[dict_->getWord(w)].size() ; i++) {
+	int32_t w2 = dict_->getId(ontmap[dict_->getWord(w)][i]) ;
+	int32_t boundary = uniform(model.rng);
+	const std::vector<int32_t>& ngrams = dict_->getSubwords(line[w2]);
+	for (int32_t c = -boundary; c <= boundary; c++) {
+	  if (c != 0 && w2 + c >= 0 && w2 + c < line.size()) {
+	    model.update(ngrams, line[w2 + c], lr);
+	  }
+	}
+      }
+    } else {
+      int32_t boundary = uniform(model.rng);
+      const std::vector<int32_t>& ngrams = dict_->getSubwords(line[w]);
+      for (int32_t c = -boundary; c <= boundary; c++) {
+	if (c != 0 && w + c >= 0 && w + c < line.size()) {
+	  model.update(ngrams, line[w + c], lr);
+	}
       }
     }
   }
@@ -634,9 +658,31 @@ void FastText::loadVectors(std::string filename) {
   }
 }
 
+  void FastText::readOntMap(std::string fn) {
+    std::cout << "Reading ontology mapping file " << dict_->nwords() << "\n" ;
+    std::ifstream in(fn);
+    char buffer[BUFFERSIZE];
+    while (in) {
+      in.getline(buffer, BUFFERSIZE);
+      char* source = std::strtok(buffer, "\t");
+      if (source != NULL) {
+	dict_->add(source);
+	ontmap[source] = std::vector<std::string>();
+	char* sup = std::strtok(NULL, "\t");
+	while (sup != NULL) {
+	  ontmap[source].push_back(sup);
+	  dict_->add(sup);
+	  sup = std::strtok(NULL, "\t");
+	}
+      }
+    }
+    std::cout << "Added ontology classes to dictionary " << dict_->nwords() << "\n" ;
+  }
+  
 void FastText::train(std::shared_ptr<Args> args) {
   args_ = args;
   dict_ = std::make_shared<Dictionary>(args_);
+  readOntMap(args_->ontfile);
   if (args_->input == "-") {
     // manage expectations
     std::cerr << "Cannot use stdin for training!" << std::endl;
@@ -649,6 +695,7 @@ void FastText::train(std::shared_ptr<Args> args) {
   }
   dict_->readFromFile(ifs);
   ifs.close();
+
 
   if (args_->pretrainedVectors.size() != 0) {
     loadVectors(args_->pretrainedVectors);

@@ -54,7 +54,10 @@ class FastText {
   int32_t version;
 
   void startThreads();
+  void readOntMap(std::string fn);
 
+  std::unordered_map<std::string, std::vector<std::string>> ontmap;
+  
  public:
   FastText();
 
@@ -105,7 +108,7 @@ class FastText {
   void analogies(int32_t);
   void trainThread(int32_t);
   void train(std::shared_ptr<Args>);
-
+  
   void loadVectors(std::string);
   int getDimension() const;
   bool isQuant() const;

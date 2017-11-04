@@ -37,6 +37,8 @@ Args::Args() {
   pretrainedVectors = "";
   saveOutput = 0;
 
+  ontfile = "" ;
+  
   qout = false;
   retrain = false;
   qnorm = false;
@@ -81,6 +83,8 @@ void Args::parseArgs(const std::vector<std::string>& args) {
       exit(EXIT_FAILURE);
     } else if (args[ai] == "-input") {
       input = std::string(args[ai + 1]);
+    } else if (args[ai] == "-ontfile") {
+      ontfile = std::string(args[ai + 1]);
     } else if (args[ai] == "-test") {
       test = std::string(args[ai + 1]);
     } else if (args[ai] == "-output") {
