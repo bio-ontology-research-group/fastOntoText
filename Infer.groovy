@@ -52,16 +52,15 @@ ConsoleProgressMonitor progressMonitor = new ConsoleProgressMonitor()
 OWLReasonerConfiguration config = new SimpleConfiguration(progressMonitor)
 ElkReasonerFactory f1 = new ElkReasonerFactory()
 OWLReasoner reasoner = f1.createReasoner(ont,config)
+ShortFormProvider prov = new SimpleShortFormProvider()
 
 def fout = new PrintWriter(new BufferedWriter(new FileWriter(opt.o)))
 ont.getClassesInSignature(false).each { cl ->
   def count = 0
-  fout.print(cl)
+    fout.print(prov.getShortForm(cl).replace("GO_", "go:"))
   reasoner.getSuperClasses(cl, false).getFlattened().each { sup ->
-    count += 1
-    if (count <= MAX_DEPTH) {
-      fout.print("\t"+sup)
-    }
+	if (sup == fac.getOWLThing()) return;
+	fout.print("\t"+prov.getShortForm(sup).replace("GO_", "go:"))
   }
   fout.println("")
 }
