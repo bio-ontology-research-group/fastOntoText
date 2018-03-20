@@ -97,14 +97,17 @@ class _FastText():
         self.f.getInputVector(b, ind)
         return np.array(b)
 
-    # Process one line only!
-    def predict(self, text, k=1):
+    def predict(self, text, k=1, threshold=0.0):
         """
         Given a string, get a list of labels and a list of
         corresponding probabilities. k controls the number
         of returned labels. A choice of 5, will return the 5
         most probable labels. By default this returns only
-        the most likely label and probability.
+        the most likely label and probability. threshold filters
+        the returned labels by a threshold on probability. A
+        choice of 0.5 will return labels with at least 0.5
+        probability. k and threshold will be applied together to
+        determine the returned labels.
 
         This function assumes to be given
         a single line of text. We split words on whitespace (space,
@@ -112,16 +115,28 @@ class _FastText():
         return, formfeed and the null character.
 
         If the model is not supervised, this function will throw a ValueError.
+
+        If given a list of strings, it will return a list of results as usually
+        received for a single line of text.
         """
-        if text.find('\n') != -1:
-            raise ValueError(
-                "predict processes one line at a time (remove \'\\n\')"
-            )
-        text += "\n"
-        pairs = self.f.predict(text, k)
-        probs, labels = zip(*pairs)
-        probs = np.exp(np.array(probs))
-        return labels, probs
+
+        def check(entry):
+            if entry.find('\n') != -1:
+                raise ValueError(
+                    "predict processes one line at a time (remove \'\\n\')"
+                )
+            entry += "\n"
+            return entry
+
+        if type(text) == list:
+            text = [check(entry) for entry in text]
+            all_probs, all_labels = self.f.multilinePredict(text, k, threshold)
+            return all_labels, np.array(all_probs, copy=False)
+        else:
+            text = check(text)
+            pairs = self.f.predict(text, k, threshold)
+            probs, labels = zip(*pairs)
+            return labels, np.array(probs, copy=False)
 
     def get_input_matrix(self):
         """
@@ -172,13 +187,38 @@ class _FastText():
         else:
             return self.get_words(include_freq)
 
+    def get_line(self, text):
+        """
+        Split a line of text into words and labels. Labels must start with
+        the prefix used to create the model (__label__ by default).
+        """
+
+        def check(entry):
+            if entry.find('\n') != -1:
+                raise ValueError(
+                    "get_line processes one line at a time (remove \'\\n\')"
+                )
+            entry += "\n"
+            return entry
+
+        if type(text) == list:
+            text = [check(entry) for entry in text]
+            return self.f.multilineGetLine(text)
+        else:
+            text = check(text)
+            return self.f.getLine(text)
+
     def save_model(self, path):
         """Save the model to the given path"""
         self.f.saveModel(path)
 
+    def test(self, path, k=1):
+        """Evaluate supervised model using file given by path"""
+        return self.f.test(path, k)
+
     def quantize(
         self,
-        input="",
+        input=None,
         qout=False,
         cutoff=0,
         retrain=False,
@@ -202,6 +242,10 @@ class _FastText():
             thread = a.thread
         if not verbose:
             verbose = a.verbose
+        if retrain and not input:
+            raise ValueError("Need input file path if retraining")
+        if input is None:
+            input = ""
         self.f.quantize(
             input, qout, cutoff, retrain, epoch, lr, thread, verbose, dsub,
             qnorm
@@ -241,10 +285,11 @@ def _build_args(args):
     a = fasttext.args()
     for (k, v) in args.items():
         setattr(a, k, v)
-    a.test = ""  # Unused
     a.output = ""  # User should use save_model
     a.pretrainedVectors = ""  # Unsupported
     a.saveOutput = 0  # Never use this
+    if a.wordNgrams <= 1 and a.maxn == 0:
+        a.bucket = 0
     return a
 
 
@@ -267,6 +312,8 @@ def train_supervised(
     epoch=5,
     minCount=1,
     minCountLabel=0,
+    minn=0,
+    maxn=0,
     neg=5,
     wordNgrams=1,
     loss="softmax",
@@ -277,7 +324,6 @@ def train_supervised(
     label="__label__",
     verbose=2,
     pretrainedVectors="",
-    saveOutput=0
 ):
     """
     Train a supervised model and return a model object.
@@ -291,8 +337,6 @@ def train_supervised(
     example consult the example datasets which are part of the fastText
     repository such as the dataset pulled by classification-example.sh.
     """
-    minn = 0
-    maxn = 0
     model = "supervised"
     a = _build_args(locals())
     ft = _FastText()
@@ -321,7 +365,6 @@ def train_unsupervised(
     label="__label__",
     verbose=2,
     pretrainedVectors="",
-    saveOutput=0
 ):
     """
     Train an unsupervised model and return a model object.
@@ -331,7 +374,7 @@ def train_unsupervised(
     as UTF-8. You might want to consult standard preprocessing scripts such
     as tokenizer.perl mentioned here: http://www.statmt.org/wmt07/baseline.html
 
-    The input fiel must not contain any labels or use the specified label prefix
+    The input field must not contain any labels or use the specified label prefix
     unless it is ok for those words to be ignored. For an example consult the
     dataset pulled by the example script word-vector-example.sh, which is
     part of the fastText repository.

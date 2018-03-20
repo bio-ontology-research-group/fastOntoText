@@ -16,6 +16,33 @@
 #include <vector.h>
 #include <iterator>
 #include <sstream>
+#include <cmath>
+
+std::pair<std::vector<std::string>, std::vector<std::string>> getLineText(
+    fasttext::FastText& m,
+    const std::string text) {
+  std::shared_ptr<const fasttext::Dictionary> d = m.getDictionary();
+  std::stringstream ioss(text);
+  std::string token;
+  std::vector<std::string> words;
+  std::vector<std::string> labels;
+  while (d->readWord(ioss, token)) {
+    uint32_t h = d->hash(token);
+    int32_t wid = d->getId(token, h);
+    fasttext::entry_type type = wid < 0 ? d->getType(token) : d->getType(wid);
+
+    if (type == fasttext::entry_type::word) {
+      words.push_back(token);
+    // Labels must not be OOV!
+    } else if (type == fasttext::entry_type::label && wid >= 0) {
+      labels.push_back(token);
+    }
+    if (token == fasttext::Dictionary::EOS)
+      break;
+  }
+  return std::pair<std::vector<std::string>, std::vector<std::string>>(
+      words, labels);
+}
 
 namespace py = pybind11;
 
@@ -23,7 +50,6 @@ PYBIND11_MODULE(fasttext_pybind, m) {
   py::class_<fasttext::Args>(m, "args")
       .def(py::init<>())
       .def_readwrite("input", &fasttext::Args::input)
-      .def_readwrite("test", &fasttext::Args::test)
       .def_readwrite("output", &fasttext::Args::output)
       .def_readwrite("lr", &fasttext::Args::lr)
       .def_readwrite("lrUpdateRate", &fasttext::Args::lrUpdateRate)
@@ -64,20 +90,20 @@ PYBIND11_MODULE(fasttext_pybind, m) {
       .value("softmax", fasttext::loss_name::softmax)
       .export_values();
 
-  m.def("train", [](fasttext::FastText& ft, fasttext::Args& a) {
-    std::shared_ptr<fasttext::Args> sa = std::make_shared<fasttext::Args>(a);
-    ft.train(sa);
-  });
+  m.def(
+      "train",
+      [](fasttext::FastText& ft, fasttext::Args& a) { ft.train(a); },
+      py::call_guard<py::gil_scoped_release>());
 
   py::class_<fasttext::Vector>(m, "Vector", py::buffer_protocol())
       .def(py::init<ssize_t>())
       .def_buffer([](fasttext::Vector& m) -> py::buffer_info {
         return py::buffer_info(
-            m.data_,
+            m.data(),
             sizeof(fasttext::real),
             py::format_descriptor<fasttext::real>::format(),
             1,
-            {m.m_},
+            {m.size()},
             {sizeof(fasttext::real)});
       });
 
@@ -87,12 +113,13 @@ PYBIND11_MODULE(fasttext_pybind, m) {
       .def(py::init<ssize_t, ssize_t>())
       .def_buffer([](fasttext::Matrix& m) -> py::buffer_info {
         return py::buffer_info(
-            m.data_,
+            m.data(),
             sizeof(fasttext::real),
             py::format_descriptor<fasttext::real>::format(),
             2,
-            {m.m_, m.n_},
-            {sizeof(fasttext::real) * m.n_, sizeof(fasttext::real) * (int64_t)1});
+            {m.size(0), m.size(1)},
+            {sizeof(fasttext::real) * m.size(1),
+             sizeof(fasttext::real) * (int64_t)1});
       });
 
   py::class_<fasttext::FastText>(m, "fasttext")
@@ -117,12 +144,22 @@ PYBIND11_MODULE(fasttext_pybind, m) {
           "saveModel",
           [](fasttext::FastText& m, std::string s) { m.saveModel(s); })
       .def(
+          "test",
+          [](fasttext::FastText& m, const std::string filename, int32_t k) {
+            std::ifstream ifs(filename);
+            if (!ifs.is_open()) {
+              throw std::invalid_argument("Test file cannot be opened!");
+            }
+            std::tuple<int64_t, double, double> result = m.test(ifs, k);
+            ifs.close();
+            return result;
+          })
+      .def(
           "getSentenceVector",
           [](fasttext::FastText& m,
              fasttext::Vector& v,
              const std::string text) {
-            std::stringstream ioss;
-            copy(text.begin(), text.end(), std::ostream_iterator<char>(ioss));
+            std::stringstream ioss(text);
             m.getSentenceVector(ioss, v);
           })
       .def(
@@ -130,8 +167,7 @@ PYBIND11_MODULE(fasttext_pybind, m) {
           [](fasttext::FastText& m, const std::string text) {
             std::vector<std::string> text_split;
             std::shared_ptr<const fasttext::Dictionary> d = m.getDictionary();
-            std::stringstream ioss;
-            copy(text.begin(), text.end(), std::ostream_iterator<char>(ioss));
+            std::stringstream ioss(text);
             std::string token;
             while (!ioss.eof()) {
               while (d->readWord(ioss, token)) {
@@ -139,6 +175,25 @@ PYBIND11_MODULE(fasttext_pybind, m) {
               }
             }
             return text_split;
+          })
+      .def("getLine", &getLineText)
+      .def(
+          "multilineGetLine",
+          [](fasttext::FastText& m, const std::vector<std::string> lines) {
+            std::shared_ptr<const fasttext::Dictionary> d = m.getDictionary();
+            std::vector<std::vector<std::string>> all_words;
+            std::vector<std::vector<std::string>> all_labels;
+            std::vector<std::string> words;
+            std::vector<std::string> labels;
+            std::string token;
+            for (const auto& text : lines) {
+              auto pair = getLineText(m, text);
+              all_words.push_back(pair.first);
+              all_labels.push_back(pair.second);
+            }
+            return std::pair<
+                std::vector<std::vector<std::string>>,
+                std::vector<std::vector<std::string>>>(all_words, all_labels);
           })
       .def(
           "getVocab",
@@ -181,36 +236,65 @@ PYBIND11_MODULE(fasttext_pybind, m) {
              int verbose,
              int32_t dsub,
              bool qnorm) {
-            std::shared_ptr<fasttext::Args> qa =
-                std::make_shared<fasttext::Args>();
-            qa->input = input;
-            qa->qout = qout;
-            qa->cutoff = cutoff;
-            qa->retrain = retrain;
-            qa->epoch = epoch;
-            qa->lr = lr;
-            qa->thread = thread;
-            qa->verbose = verbose;
-            qa->dsub = dsub;
-            qa->qnorm = qnorm;
+            fasttext::Args qa = fasttext::Args();
+            qa.input = input;
+            qa.qout = qout;
+            qa.cutoff = cutoff;
+            qa.retrain = retrain;
+            qa.epoch = epoch;
+            qa.lr = lr;
+            qa.thread = thread;
+            qa.verbose = verbose;
+            qa.dsub = dsub;
+            qa.qnorm = qnorm;
             m.quantize(qa);
           })
       .def(
           "predict",
           // NOTE: text needs to end in a newline
           // to exactly mimic the behavior of the cli
-          [](fasttext::FastText& m, const std::string text, int32_t k) {
+          [](fasttext::FastText& m,
+             const std::string text,
+             int32_t k,
+             fasttext::real threshold) {
             std::vector<std::pair<fasttext::real, std::string>> predictions;
-            std::stringstream ioss;
-            copy(text.begin(), text.end(), std::ostream_iterator<char>(ioss));
-            m.predict(ioss, k, predictions);
+            std::stringstream ioss(text);
+            m.predict(ioss, k, predictions, threshold);
+            for (auto& pair : predictions) {
+              pair.first = std::exp(pair.first);
+            }
             return predictions;
           })
       .def(
-          "isQuant",
-          [](fasttext::FastText& m) {
-            return m.isQuant();
+          "multilinePredict",
+          // NOTE: text needs to end in a newline
+          // to exactly mimic the behavior of the cli
+          [](fasttext::FastText& m,
+             const std::vector<std::string>& lines,
+             int32_t k,
+             fasttext::real threshold) {
+            std::pair<
+                std::vector<std::vector<fasttext::real>>,
+                std::vector<std::vector<std::string>>>
+                all_predictions;
+            std::vector<std::pair<fasttext::real, std::string>> predictions;
+            for (const std::string& text : lines) {
+              std::stringstream ioss(text);
+              predictions.clear();
+              m.predict(ioss, k, predictions, threshold);
+              all_predictions.first.push_back(std::vector<fasttext::real>());
+              all_predictions.second.push_back(std::vector<std::string>());
+              for (auto& pair : predictions) {
+                pair.first = std::exp(pair.first);
+                all_predictions.first[all_predictions.first.size() - 1]
+                    .push_back(pair.first);
+                all_predictions.second[all_predictions.second.size() - 1]
+                    .push_back(pair.second);
+              }
+            }
+            return all_predictions;
           })
+      .def("isQuant", [](fasttext::FastText& m) { return m.isQuant(); })
       .def(
           "getWordId",
           [](fasttext::FastText& m, const std::string word) {
